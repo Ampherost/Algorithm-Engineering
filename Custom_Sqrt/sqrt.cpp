@@ -70,13 +70,24 @@ int main() {
     // Call fastsqrt
     fastsqrt(in, out, count);
 
-    // Print results and compare with std::sqrt
+     // Print results and compare with std::sqrt
     std::cout << std::fixed << std::setprecision(6);
-    std::cout << "Input\tfastsqrt\tstd::sqrt\tError" << std::endl;
+    std::cout << std::left
+              << std::setw(10) << "Input"
+              << std::setw(15) << "fastsqrt"
+              << std::setw(15) << "std::sqrt"
+              << std::setw(15) << "Error" 
+              << std::endl;
+              
     for (unsigned i = 0; i < count; ++i) {
         float std_sqrt = std::sqrt(in[i]);
         float error = fabs(out[i] - std_sqrt);
-        std::cout << in[i] << "\t" << out[i] << "\t\t" << std_sqrt << "\t\t" << error << std::endl;
+        std::cout << std::left
+                  << std::setw(10) << in[i]
+                  << std::setw(15) << out[i]
+                  << std::setw(15) << std_sqrt
+                  << std::setw(15) << error 
+                  << std::endl;
     }
 
     // Clean up
