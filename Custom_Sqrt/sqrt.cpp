@@ -17,17 +17,22 @@ extern "C" void fastsqrt(const float* in, float* out, unsigned count) {
 #ifdef NEWTON_RAPHSON
 for (unsigned i = 0; i < count; ++i) {
         float x = in[i];
-        float y = x / 2.0f;  // Initial guess
-        const float tolerance = 1e-6;  // Precision tolerance
+
+        // Bit manipulation
+        union {
+            float f;
+            uint32_t i;
+        } u;
+        u.f = x;
         
-        // Iteratively improve the guess
-        while (true) {
-            float nextY = 0.5f * (y + x / y);
-            if (fabs(nextY - y) < tolerance) {
-                break;
-            }
-            y = nextY;
-        }
+        u.i = (u.i >> 1) + (63 << 23);
+        
+        float y = u.f; 
+        
+        y = 0.5f * (y + x / y);
+        y = 0.5f * (y + x / y);
+        y = 0.5f * (y + x / y);
+        y = 0.5f * (y + x / y);
         
         out[i] = y;  // Store the result
     }
@@ -41,6 +46,7 @@ for (unsigned i = 0; i < count; ++i) {
 #endif
 }
 
+/*
 int main() {
     ifstream file("numbers.txt");
     if (!file.is_open()) {
@@ -95,3 +101,4 @@ int main() {
    
     return 0;
 }
+*/
