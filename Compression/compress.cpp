@@ -65,4 +65,49 @@ std::string compress(const std::string& source) {
     return oss.str();
 }
 
-std::string decompress(const std::string& source) {}
+
+
+std::string decompress(const std::string& source) {
+    std::istringstream iss(source);
+    std::ostringstream oss;  // decompressed output
+    std::string token;
+    
+    // We'll store everything in a dynamic buffer (std::string in oss).
+    // For each token, we see if it's 'M' or 'L', then read the appropriate values.
+    
+    while (iss >> token) {
+        if (token == "M") {
+            // match token
+            int offset, length, nextCharVal;
+            iss >> offset >> length >> nextCharVal;  // read offset, length, nextChar
+            char nextChar = static_cast<char>(nextCharVal);
+            
+            // copy 'length' characters from 'offset' behind the current output end
+            // oss.str() is the full output so far. We'll read from it.
+            std::string currentOutput = oss.str();
+            int startCopyPos = static_cast<int>(currentOutput.size()) - offset;
+            
+            for (int i = 0; i < length; ++i) {
+                // append the char from startCopyPos + i
+                oss << currentOutput[startCopyPos + i];
+            }
+            
+            // then append nextChar (unless it was '\0', check how you handle end-of-data)
+            if (nextChar != '\0') {
+                oss << nextChar;
+            }
+        }
+        else if (token == "L") {
+            // literal token
+            int charVal;
+            iss >> charVal;
+            char c = static_cast<char>(charVal);
+            oss << c;
+        }
+        else {
+            // Unexpected token. Handle error or ignore.
+        }
+    }
+    
+    return oss.str();
+}
