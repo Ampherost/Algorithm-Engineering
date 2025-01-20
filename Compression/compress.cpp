@@ -1,113 +1,275 @@
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
+#include <queue>
 #include <sstream>
-#include <algorithm>  
 #include <iostream>
+#include <cstdint>
 
-static const int WINDOW_SIZE = 4096;    
-static const int MIN_MATCH_LENGTH = 3; 
-
-struct Match {
-    int offset;
-    int length;
+// ------------------ Token Definition ------------------
+enum class TokenType {
+    LITERAL,
+    MATCH
 };
 
-std::string compress(const std::string& source) {
-    std::ostringstream oss;
-    int srcSize = static_cast<int>(source.size());
-    int pos = 0;   // current position in source
+struct Token {
+    TokenType type;
+    int value;      // literal char OR offset
+    int length;     // for match
+    int nextChar;   // for match
+};
+
+// ------------------ LZ77 Params ------------------
+static const int WINDOW_SIZE = 4096;
+static const int MIN_MATCH_LENGTH = 3;
+
+// ------------------ LZ77 Compress ------------------
+std::vector<Token> lz77_compress(const std::string& input) {
+    std::vector<Token> tokens;
+    int n = (int)input.size();
+    int pos = 0;
     
-    while (pos < srcSize) {
-        // 1) Search backward in the "window" for the best match
-        //    The window goes from [pos - WINDOW_SIZE, pos) (bounded by 0 on the left)
+    while (pos < n) {
         int bestOffset = 0;
         int bestLength = 0;
-        
         int windowStart = std::max(0, pos - WINDOW_SIZE);
-        
-        // We'll do a naive search for demonstration (which can be slow for large text!).
-        // For each possible start in the window, see how many chars match.
+
+        // naive search
         for (int cand = windowStart; cand < pos; ++cand) {
             int length = 0;
-            // compare forward from 'cand' and 'pos'
-            while (cand + length < pos && pos + length < srcSize
-                   && source[cand + length] == source[pos + length]) {
-                ++length;
+            while ((pos + length) < n &&
+                   (cand + length) < pos &&
+                   input[cand + length] == input[pos + length]) 
+            {
+                length++;
             }
-            
             if (length > bestLength) {
                 bestLength = length;
-                bestOffset = pos - cand;  // how far back the match starts
+                bestOffset = pos - cand;
             }
         }
-        
-        // 2) Decide whether to output a match token or a literal token
+
         if (bestLength >= MIN_MATCH_LENGTH) {
-            // We found a good enough match
-            // nextChar: the char after the matched substring, if it exists
-            char nextChar = (pos + bestLength < srcSize)
-                ? source[pos + bestLength]
-                : '\0';  // if we reached end, use some placeholder or handle carefully
-            
-            // Output a match token: M <offset> <length> <nextChar>
-            oss << "M " << bestOffset << " " << bestLength << " " << (int)(unsigned char)nextChar << " ";
-            
-            // Move pos forward by bestLength + 1 for the nextChar
+            char nextC = (pos + bestLength < n) ? input[pos + bestLength] : '\0';
+            Token t;
+            t.type = TokenType::MATCH;
+            t.value = bestOffset;
+            t.length = bestLength;
+            t.nextChar = (unsigned char)nextC;
+            tokens.push_back(t);
+
             pos += bestLength + 1;
         } else {
-            // Not enough of a match -> literal
-            // Output a literal token: L <char>
-            oss << "L " << (int)(unsigned char)source[pos] << " ";
+            Token t;
+            t.type = TokenType::LITERAL;
+            t.value = (unsigned char)input[pos];
+            t.length = 0;
+            t.nextChar = 0;
+            tokens.push_back(t);
+
             pos += 1;
         }
     }
+
+    return tokens;
+}
+
+// ------------------ Token <--> uint32_t ------------------
+static inline uint32_t encodeToken(const Token& t) {
+    // Example bit layout (adjust for your ranges).
+    // [ type(1) | offsetOrVal(12) | length(12) | nextChar(7) ]
+    uint32_t code = 0;
+    uint32_t typeBit = (t.type == TokenType::MATCH) ? 1u : 0u;
+    uint32_t offVal = (t.value & 0x0FFF);  
+    uint32_t len    = (t.length & 0x0FFF);
+    uint32_t nc     = (t.nextChar & 0x7F);
+
+    code = (typeBit << 31)
+         | (offVal << 19)
+         | (len << 7)
+         | nc;
+    return code;
+}
+
+static inline Token decodeToken(uint32_t code) {
+    Token t;
+    uint32_t typeBit = (code >> 31) & 0x01;
+    t.type = (typeBit == 1) ? TokenType::MATCH : TokenType::LITERAL;
+    t.value = (int)((code >> 19) & 0x0FFF);
+    t.length = (int)((code >> 7) & 0x0FFF);
+    t.nextChar = (int)(code & 0x7F);
+    return t;
+}
+
+// ------------------ Huffman Structures ------------------
+struct HuffNode {
+    uint32_t symbol;
+    uint64_t freq;
+    HuffNode* left;
+    HuffNode* right;
+    bool operator>(const HuffNode& other) const {
+        return freq > other.freq;
+    }
+};
+
+HuffNode* buildHuffman(const std::unordered_map<uint32_t, uint64_t>& freqMap) {
+    auto cmp = [](HuffNode* a, HuffNode* b){ return a->freq > b->freq; };
+    std::priority_queue<HuffNode*, std::vector<HuffNode*>, decltype(cmp)> pq(cmp);
+
+    for (auto & kv : freqMap) {
+        auto node = new HuffNode{kv.first, kv.second, nullptr, nullptr};
+        pq.push(node);
+    }
     
+    while (pq.size() > 1) {
+        HuffNode* n1 = pq.top(); pq.pop();
+        HuffNode* n2 = pq.top(); pq.pop();
+        auto parent = new HuffNode{0, n1->freq + n2->freq, n1, n2};
+        pq.push(parent);
+    }
+    
+    return pq.empty() ? nullptr : pq.top();
+}
+
+void buildCodeTable(HuffNode* root, const std::string& prefix,
+                    std::unordered_map<uint32_t, std::string>& table) {
+    if (!root) return;
+    if (!root->left && !root->right) {
+        table[root->symbol] = prefix;
+        return;
+    }
+    buildCodeTable(root->left,  prefix + "0", table);
+    buildCodeTable(root->right, prefix + "1", table);
+}
+
+// ------------------ Huffman Encode ------------------
+std::string huffmanEncode(const std::vector<Token>& tokens) {
+    // 1) frequency
+    std::unordered_map<uint32_t, uint64_t> freqMap;
+    for (auto &t : tokens) {
+        uint32_t sym = encodeToken(t);
+        freqMap[sym]++;
+    }
+    // 2) build tree
+    HuffNode* root = buildHuffman(freqMap);
+    // 3) code table
+    std::unordered_map<uint32_t, std::string> codeTable;
+    buildCodeTable(root, "", codeTable);
+    
+    // 4) Output frequency map (text-based, for demo)
+    //    Then output the encoded bitstream
+    std::ostringstream oss;
+    oss << freqMap.size() << "\n";
+    for (auto &kv : freqMap) {
+        oss << kv.first << " " << kv.second << "\n";
+    }
+    oss << "===\n";
+    
+    // bitstream
+    for (auto &t : tokens) {
+        uint32_t sym = encodeToken(t);
+        oss << codeTable[sym];
+    }
     return oss.str();
 }
 
-
-
-std::string decompress(const std::string& source) {
-    std::istringstream iss(source);
-    std::ostringstream oss;  // decompressed output
-    std::string token;
-    
-    // We'll store everything in a dynamic buffer (std::string in oss).
-    // For each token, we see if it's 'M' or 'L', then read the appropriate values.
-    
-    while (iss >> token) {
-        if (token == "M") {
-            // match token
-            int offset, length, nextCharVal;
-            iss >> offset >> length >> nextCharVal;  // read offset, length, nextChar
-            char nextChar = static_cast<char>(nextCharVal);
-            
-            // copy 'length' characters from 'offset' behind the current output end
-            // oss.str() is the full output so far. We'll read from it.
-            std::string currentOutput = oss.str();
-            int startCopyPos = static_cast<int>(currentOutput.size()) - offset;
-            
-            for (int i = 0; i < length; ++i) {
-                // append the char from startCopyPos + i
-                oss << currentOutput[startCopyPos + i];
-            }
-            
-            // then append nextChar (unless it was '\0', check how you handle end-of-data)
-            if (nextChar != '\0') {
-                oss << nextChar;
-            }
-        }
-        else if (token == "L") {
-            // literal token
-            int charVal;
-            iss >> charVal;
-            char c = static_cast<char>(charVal);
-            oss << c;
-        }
-        else {
-            // Unexpected token. Handle error or ignore.
+// ------------------ Huffman Decode ------------------
+HuffNode* rebuildHuffman(std::istream& is) {
+    size_t mapSize;
+    is >> mapSize;
+    std::unordered_map<uint32_t, uint64_t> freqMap;
+    for (size_t i = 0; i < mapSize; i++) {
+        uint32_t sym;
+        uint64_t f;
+        is >> sym >> f;
+        freqMap[sym] = f;
+    }
+    // consume delimiter line "==="
+    {
+        std::string line;
+        std::getline(is, line);
+        if (line.empty()) {
+            std::getline(is, line);
         }
     }
+    return buildHuffman(freqMap);
+}
+
+void buildDecodeMap(HuffNode* root, const std::string& prefix,
+                    std::unordered_map<std::string, uint32_t>& decodeMap) {
+    if (!root) return;
+    if (!root->left && !root->right) {
+        decodeMap[prefix] = root->symbol;
+        return;
+    }
+    buildDecodeMap(root->left,  prefix + "0", decodeMap);
+    buildDecodeMap(root->right, prefix + "1", decodeMap);
+}
+
+std::vector<Token> huffmanDecode(const std::string& compressed) {
+    std::istringstream iss(compressed);
+    HuffNode* root = rebuildHuffman(iss);
+    if (!root) {
+        return {};
+    }
+    // build decode map
+    std::unordered_map<std::string, uint32_t> decodeMap;
+    buildDecodeMap(root, "", decodeMap);
+
+    // remainder is the bitstream
+    std::string bitstream;
+    std::getline(iss, bitstream);
     
-    return oss.str();
+    // decode
+    std::vector<Token> tokens;
+    std::string buffer;
+    for (char c : bitstream) {
+        buffer.push_back(c);
+        if (decodeMap.find(buffer) != decodeMap.end()) {
+            uint32_t sym = decodeMap[buffer];
+            tokens.push_back(decodeToken(sym));
+            buffer.clear();
+        }
+    }
+    return tokens;
+}
+
+// ------------------ LZ77 Decompress ------------------
+std::string lz77_decompress(const std::vector<Token>& tokens) {
+    std::string output;
+    output.reserve(tokens.size() * 4);
+
+    for (auto &t : tokens) {
+        if (t.type == TokenType::LITERAL) {
+            output.push_back((char)t.value);
+        } else {
+            // offset = t.value, length = t.length
+            int start = (int)output.size() - t.value;
+            for (int i = 0; i < t.length; i++) {
+                output.push_back(output[start + i]);
+            }
+            if (t.nextChar != 0) {
+                output.push_back((char)t.nextChar);
+            }
+        }
+    }
+    return output;
+}
+
+// ------------------ Final compress/decompress API ------------------
+std::string compress(const std::string& source) {
+    // LZ77
+    auto tokens = lz77_compress(source);
+    // Huffman
+    auto bitstream = huffmanEncode(tokens);
+    return bitstream;
+}
+
+std::string decompress(const std::string& source) {
+    // Huffman decode
+    auto tokens = huffmanDecode(source);
+    // LZ77 decode
+    auto result = lz77_decompress(tokens);
+    return result;
 }
