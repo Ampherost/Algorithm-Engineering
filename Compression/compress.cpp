@@ -1,275 +1,178 @@
 #include <string>
-#include <vector>
 #include <unordered_map>
-#include <algorithm>
 #include <queue>
-#include <sstream>
-#include <iostream>
-#include <cstdint>
+#include <vector>
+#include <bitset>
+#include <memory>
 
-// ------------------ Token Definition ------------------
-enum class TokenType {
-    LITERAL,
-    MATCH
+using namespace std;
+
+struct Node {
+    char character;
+    int freq;
+    Node* left;
+    Node* right;
+
+    Node(char c, int f) : character(c), freq(f), left(nullptr), right(nullptr) {}
+    Node(int f) : character('\0'), freq(f), left(nullptr), right(nullptr) {}
 };
 
-struct Token {
-    TokenType type;
-    int value;      // literal char OR offset
-    int length;     // for match
-    int nextChar;   // for match
+struct Compare {
+    bool operator()(Node* a, Node* b) {
+        return a->freq > b->freq;
+    }
 };
 
-// ------------------ LZ77 Params ------------------
-static const int WINDOW_SIZE = 4096;
-static const int MIN_MATCH_LENGTH = 3;
+void generateCodes(Node* root, string code, unordered_map<char, string>& codes) {
+    if (!root) return;
+    if (!root->left && !root->right) {
+        codes[root->character] = code;
+        return;
+    }
+    generateCodes(root->left, code + "0", codes);
+    generateCodes(root->right, code + "1", codes);
+}
 
-// ------------------ LZ77 Compress ------------------
-std::vector<Token> lz77_compress(const std::string& input) {
-    std::vector<Token> tokens;
-    int n = (int)input.size();
-    int pos = 0;
-    
-    while (pos < n) {
-        int bestOffset = 0;
-        int bestLength = 0;
-        int windowStart = std::max(0, pos - WINDOW_SIZE);
-
-        // naive search
-        for (int cand = windowStart; cand < pos; ++cand) {
-            int length = 0;
-            while ((pos + length) < n &&
-                   (cand + length) < pos &&
-                   input[cand + length] == input[pos + length]) 
-            {
-                length++;
-            }
-            if (length > bestLength) {
-                bestLength = length;
-                bestOffset = pos - cand;
-            }
+void serializeTree(Node* root, vector<bool>& bits) {
+    if (!root) return;
+    if (!root->left && !root->right) {
+        bits.push_back(true);
+        for (int i = 7; i >= 0; --i) {
+            bits.push_back((root->character >> i) & 1);
         }
+    } else {
+        bits.push_back(false);
+        serializeTree(root->left, bits);
+        serializeTree(root->right, bits);
+    }
+}
 
-        if (bestLength >= MIN_MATCH_LENGTH) {
-            char nextC = (pos + bestLength < n) ? input[pos + bestLength] : '\0';
-            Token t;
-            t.type = TokenType::MATCH;
-            t.value = bestOffset;
-            t.length = bestLength;
-            t.nextChar = (unsigned char)nextC;
-            tokens.push_back(t);
-
-            pos += bestLength + 1;
-        } else {
-            Token t;
-            t.type = TokenType::LITERAL;
-            t.value = (unsigned char)input[pos];
-            t.length = 0;
-            t.nextChar = 0;
-            tokens.push_back(t);
-
-            pos += 1;
+Node* deserializeTree(const vector<bool>& bits, size_t& pos) {
+    if (pos >= bits.size()) return nullptr;
+    bool isLeaf = bits[pos++];
+    if (isLeaf) {
+        char c = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (pos >= bits.size()) return nullptr;
+            c = (c << 1) | bits[pos++];
         }
+        return new Node(c, 0);
+    } else {
+        Node* node = new Node(0);
+        node->left = deserializeTree(bits, pos);
+        node->right = deserializeTree(bits, pos);
+        return node;
     }
-
-    return tokens;
 }
 
-// ------------------ Token <--> uint32_t ------------------
-static inline uint32_t encodeToken(const Token& t) {
-    // Example bit layout (adjust for your ranges).
-    // [ type(1) | offsetOrVal(12) | length(12) | nextChar(7) ]
-    uint32_t code = 0;
-    uint32_t typeBit = (t.type == TokenType::MATCH) ? 1u : 0u;
-    uint32_t offVal = (t.value & 0x0FFF);  
-    uint32_t len    = (t.length & 0x0FFF);
-    uint32_t nc     = (t.nextChar & 0x7F);
+string compress(const string& source) {
+    if (source.empty()) return "";
 
-    code = (typeBit << 31)
-         | (offVal << 19)
-         | (len << 7)
-         | nc;
-    return code;
-}
+    unordered_map<char, int> freq;
+    for (char c : source) freq[c]++;
 
-static inline Token decodeToken(uint32_t code) {
-    Token t;
-    uint32_t typeBit = (code >> 31) & 0x01;
-    t.type = (typeBit == 1) ? TokenType::MATCH : TokenType::LITERAL;
-    t.value = (int)((code >> 19) & 0x0FFF);
-    t.length = (int)((code >> 7) & 0x0FFF);
-    t.nextChar = (int)(code & 0x7F);
-    return t;
-}
-
-// ------------------ Huffman Structures ------------------
-struct HuffNode {
-    uint32_t symbol;
-    uint64_t freq;
-    HuffNode* left;
-    HuffNode* right;
-    bool operator>(const HuffNode& other) const {
-        return freq > other.freq;
+    priority_queue<Node*, vector<Node*>, Compare> pq;
+    for (const auto& pair : freq) {
+        pq.push(new Node(pair.first, pair.second));
     }
-};
 
-HuffNode* buildHuffman(const std::unordered_map<uint32_t, uint64_t>& freqMap) {
-    auto cmp = [](HuffNode* a, HuffNode* b){ return a->freq > b->freq; };
-    std::priority_queue<HuffNode*, std::vector<HuffNode*>, decltype(cmp)> pq(cmp);
+    if (pq.empty()) return "";
 
-    for (auto & kv : freqMap) {
-        auto node = new HuffNode{kv.first, kv.second, nullptr, nullptr};
-        pq.push(node);
-    }
-    
     while (pq.size() > 1) {
-        HuffNode* n1 = pq.top(); pq.pop();
-        HuffNode* n2 = pq.top(); pq.pop();
-        auto parent = new HuffNode{0, n1->freq + n2->freq, n1, n2};
-        pq.push(parent);
+        Node* left = pq.top(); pq.pop();
+        Node* right = pq.top(); pq.pop();
+        Node* internal = new Node(left->freq + right->freq);
+        internal->left = left;
+        internal->right = right;
+        pq.push(internal);
     }
-    
-    return pq.empty() ? nullptr : pq.top();
-}
 
-void buildCodeTable(HuffNode* root, const std::string& prefix,
-                    std::unordered_map<uint32_t, std::string>& table) {
-    if (!root) return;
-    if (!root->left && !root->right) {
-        table[root->symbol] = prefix;
-        return;
-    }
-    buildCodeTable(root->left,  prefix + "0", table);
-    buildCodeTable(root->right, prefix + "1", table);
-}
+    Node* root = pq.top();
 
-// ------------------ Huffman Encode ------------------
-std::string huffmanEncode(const std::vector<Token>& tokens) {
-    // 1) frequency
-    std::unordered_map<uint32_t, uint64_t> freqMap;
-    for (auto &t : tokens) {
-        uint32_t sym = encodeToken(t);
-        freqMap[sym]++;
-    }
-    // 2) build tree
-    HuffNode* root = buildHuffman(freqMap);
-    // 3) code table
-    std::unordered_map<uint32_t, std::string> codeTable;
-    buildCodeTable(root, "", codeTable);
-    
-    // 4) Output frequency map (text-based, for demo)
-    //    Then output the encoded bitstream
-    std::ostringstream oss;
-    oss << freqMap.size() << "\n";
-    for (auto &kv : freqMap) {
-        oss << kv.first << " " << kv.second << "\n";
-    }
-    oss << "===\n";
-    
-    // bitstream
-    for (auto &t : tokens) {
-        uint32_t sym = encodeToken(t);
-        oss << codeTable[sym];
-    }
-    return oss.str();
-}
+    unordered_map<char, string> codes;
+    generateCodes(root, "", codes);
 
-// ------------------ Huffman Decode ------------------
-HuffNode* rebuildHuffman(std::istream& is) {
-    size_t mapSize;
-    is >> mapSize;
-    std::unordered_map<uint32_t, uint64_t> freqMap;
-    for (size_t i = 0; i < mapSize; i++) {
-        uint32_t sym;
-        uint64_t f;
-        is >> sym >> f;
-        freqMap[sym] = f;
-    }
-    // consume delimiter line "==="
-    {
-        std::string line;
-        std::getline(is, line);
-        if (line.empty()) {
-            std::getline(is, line);
+    vector<bool> treeBits;
+    serializeTree(root, treeBits);
+
+    vector<bool> dataBits;
+    for (char c : source) {
+        string code = codes[c];
+        for (char bit : code) {
+            dataBits.push_back(bit == '1');
         }
     }
-    return buildHuffman(freqMap);
-}
 
-void buildDecodeMap(HuffNode* root, const std::string& prefix,
-                    std::unordered_map<std::string, uint32_t>& decodeMap) {
-    if (!root) return;
-    if (!root->left && !root->right) {
-        decodeMap[prefix] = root->symbol;
-        return;
+    vector<bool> allBits = treeBits;
+
+    uint32_t dataBitCount = dataBits.size();
+    for (int i = 31; i >= 0; --i) {
+        allBits.push_back((dataBitCount >> i) & 1);
     }
-    buildDecodeMap(root->left,  prefix + "0", decodeMap);
-    buildDecodeMap(root->right, prefix + "1", decodeMap);
-}
 
-std::vector<Token> huffmanDecode(const std::string& compressed) {
-    std::istringstream iss(compressed);
-    HuffNode* root = rebuildHuffman(iss);
-    if (!root) {
-        return {};
-    }
-    // build decode map
-    std::unordered_map<std::string, uint32_t> decodeMap;
-    buildDecodeMap(root, "", decodeMap);
+    allBits.insert(allBits.end(), dataBits.begin(), dataBits.end());
 
-    // remainder is the bitstream
-    std::string bitstream;
-    std::getline(iss, bitstream);
-    
-    // decode
-    std::vector<Token> tokens;
-    std::string buffer;
-    for (char c : bitstream) {
-        buffer.push_back(c);
-        if (decodeMap.find(buffer) != decodeMap.end()) {
-            uint32_t sym = decodeMap[buffer];
-            tokens.push_back(decodeToken(sym));
-            buffer.clear();
+    string compressed;
+    compressed.reserve((allBits.size() + 7) / 8);
+    unsigned char byte = 0;
+    int bitCount = 0;
+    for (bool bit : allBits) {
+        byte = (byte << 1) | bit;
+        if (++bitCount == 8) {
+            compressed.push_back(byte);
+            byte = 0;
+            bitCount = 0;
         }
     }
-    return tokens;
+    if (bitCount > 0) {
+        byte <<= (8 - bitCount);
+        compressed.push_back(byte);
+    }
+
+    delete root;
+    return compressed;
 }
 
-// ------------------ LZ77 Decompress ------------------
-std::string lz77_decompress(const std::vector<Token>& tokens) {
-    std::string output;
-    output.reserve(tokens.size() * 4);
+string decompress(const string& source) {
+    if (source.empty()) return "";
 
-    for (auto &t : tokens) {
-        if (t.type == TokenType::LITERAL) {
-            output.push_back((char)t.value);
-        } else {
-            // offset = t.value, length = t.length
-            int start = (int)output.size() - t.value;
-            for (int i = 0; i < t.length; i++) {
-                output.push_back(output[start + i]);
-            }
-            if (t.nextChar != 0) {
-                output.push_back((char)t.nextChar);
-            }
+    vector<bool> bitstream;
+    for (unsigned char c : source) {
+        for (int i = 7; i >= 0; --i) {
+            bitstream.push_back((c >> i) & 1);
         }
     }
-    return output;
-}
 
-// ------------------ Final compress/decompress API ------------------
-std::string compress(const std::string& source) {
-    // LZ77
-    auto tokens = lz77_compress(source);
-    // Huffman
-    auto bitstream = huffmanEncode(tokens);
-    return bitstream;
-}
+    size_t pos = 0;
+    Node* root = deserializeTree(bitstream, pos);
+    if (!root) return "";
 
-std::string decompress(const std::string& source) {
-    // Huffman decode
-    auto tokens = huffmanDecode(source);
-    // LZ77 decode
-    auto result = lz77_decompress(tokens);
+    if (pos + 32 > bitstream.size()) {
+        delete root;
+        return "";
+    }
+
+    uint32_t dataBitCount = 0;
+    for (int i = 0; i < 32; ++i) {
+        dataBitCount = (dataBitCount << 1) | bitstream[pos++];
+    }
+
+    vector<bool> dataBits;
+    while (pos < bitstream.size() && dataBits.size() < dataBitCount) {
+        dataBits.push_back(bitstream[pos++]);
+    }
+
+    string result;
+    Node* current = root;
+    for (bool bit : dataBits) {
+        current = bit ? current->right : current->left;
+        if (!current) break;
+        if (!current->left && !current->right) {
+            result += current->character;
+            current = root;
+        }
+    }
+
+    delete root;
     return result;
 }
